@@ -24,6 +24,7 @@ type Menu interface {
 	ShortCut() string
 	HasArbitraryInput() bool
 	GenerateMenuFn(context.Context, UssdPayload, Menu) (*SessionResponse, error)
+	ParseResponse(key string, args ...interface{}) *SessionResponse
 }
 
 type generateMenuFn func(context.Context, UssdPayload, Menu) (*SessionResponse, error)
@@ -98,7 +99,7 @@ func (m *menu) MenuText(lang string) string {
 	return m.MenuContent[lang]
 }
 
-func (m *menu) MenuResponse(langKey string, args ...interface{}) *SessionResponse {
+func (m *menu) ParseResponse(langKey string, args ...any) *SessionResponse {
 	res := m.MenuText(langKey)
 	if len(args) > 0 {
 		res = fmt.Sprintf(m.MenuText(langKey), args...)

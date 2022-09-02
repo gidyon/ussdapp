@@ -64,6 +64,8 @@ func NewUssdApp(ctx context.Context, opt *Options) (*UssdApp, error) {
 		opt:      opt,
 	}
 
+	_ = ctx
+
 	return app, nil
 }
 
