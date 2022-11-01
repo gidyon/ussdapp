@@ -76,3 +76,7 @@ func (rc *redisCache) SetUnique(ctx context.Context, key string, value string) (
 func (rc *redisCache) ExistInSet(ctx context.Context, key, value string) (bool, error) {
 	return rc.cc.SIsMember(ctx, key, value).Result()
 }
+
+func (rc *redisCache) DeleteSetValue(ctx context.Context, key, value string) error {
+	return rc.cc.SRem(ctx, key, value).Err()
+}

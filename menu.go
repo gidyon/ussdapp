@@ -4,10 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log"
-	"net/http"
-	"strings"
 )
 
 var (
@@ -16,54 +12,68 @@ var (
 	ErrMenuExist        = fmt.Errorf("menu is registered")
 )
 
-// Menu is an interface to be used for reading menu options. Prevents writes to the underlying menu data
+// Menu has information about a USSD menu page. It is an interface to prevent underlying menu data from unwanted writes.
 type Menu interface {
+	// MenuName returns the name of the menu
 	MenuName() string
+	// PreviousMenu returns the previous menu for this menu
 	PreviousMenu() string
+	// NextMenu returns the next menu for this menu
 	NextMenu() string
+	// Shortcut returns the shortcut text
 	ShortCut() string
-	HasArbitraryInput() bool
-	GenerateMenuFn(context.Context, UssdPayload, Menu) (*SessionResponse, error)
-	ParseResponse(key string, args ...interface{}) *SessionResponse
+	// GenerateResponse calls the underlying logic registered for the menu and will return session response.
+	GenerateResponse(context.Context, UssdPayload) (SessionResponse, error)
+	// ExecuteMenuArgs applies the arguments to the specified menu item with given key, returning the resulting session response.
+	ExecuteMenuArgs(key string, args ...interface{}) SessionResponse
 }
 
-type generateMenuFn func(context.Context, UssdPayload, Menu) (*SessionResponse, error)
+type generateMenuFn func(context.Context, UssdPayload) (SessionResponse, error)
 
 // MenuOptions contains data for a USSD menu.
 type MenuOptions struct {
-	MenuName          string
-	PreviousMenu      string
-	NextMenu          string
-	ShortCut          string
-	HasArbitraryInput bool
-	MenuItems         map[string]string
-	MenuContent       map[string]string
-	GenerateMenuFn    generateMenuFn
+	MenuName       string
+	PreviousMenu   string
+	NextMenu       string
+	ShortCut       string
+	MenuContent    map[string]string
+	GenerateMenuFn func(context.Context, UssdPayload, Menu) (SessionResponse, error)
+}
+
+type fn1 func(context.Context, UssdPayload, Menu) (SessionResponse, error)
+
+func wrap(in fn1, m Menu) generateMenuFn {
+	return func(ctx context.Context, up UssdPayload) (SessionResponse, error) {
+		return in(ctx, up, m)
+	}
 }
 
 // NewMenu will create a new menu instance
 func NewMenu(opt *MenuOptions) Menu {
 	m := &menu{
-		menuName:          opt.MenuName,
-		previousMenu:      opt.PreviousMenu,
-		nextMenu:          opt.NextMenu,
-		shortCut:          opt.ShortCut,
-		hasArbitraryInput: opt.HasArbitraryInput,
-		generateMenuFn:    opt.GenerateMenuFn,
+		menuName:     opt.MenuName,
+		previousMenu: opt.PreviousMenu,
+		nextMenu:     opt.NextMenu,
+		shortCut:     opt.ShortCut,
+		menuContent:  make(map[string]string, len(opt.MenuContent)),
 	}
+	data := make(map[string]string, len(opt.MenuContent))
+	for k, v := range opt.MenuContent {
+		data[k] = v
+	}
+	m.menuContent = data
+	m.generateMenuFn = wrap(opt.GenerateMenuFn, m)
 
 	return m
 }
 
 type menu struct {
-	menuName          string
-	previousMenu      string
-	nextMenu          string
-	shortCut          string
-	hasArbitraryInput bool
-	menuItems         map[string]string
-	generateMenuFn    generateMenuFn
-	MenuContent       map[string]string
+	menuName       string
+	previousMenu   string
+	nextMenu       string
+	shortCut       string
+	generateMenuFn func(context.Context, UssdPayload) (SessionResponse, error)
+	menuContent    map[string]string
 }
 
 func (m *menu) MenuName() string {
@@ -82,100 +92,38 @@ func (m *menu) ShortCut() string {
 	return m.shortCut
 }
 
-func (m *menu) HasArbitraryInput() bool {
-	return m.hasArbitraryInput
-}
-
-func (m *menu) MenuItems() map[string]string {
-	return m.menuItems
-}
-
-func (m *menu) GenerateMenuFn(ctx context.Context, p UssdPayload, menu Menu) (*SessionResponse, error) {
-	return m.generateMenuFn(ctx, p, menu)
-}
-
-// MenuText returns the menu text
-func (m *menu) MenuText(lang string) string {
-	return m.MenuContent[lang]
-}
-
-func (m *menu) ParseResponse(langKey string, args ...any) *SessionResponse {
-	res := m.MenuText(langKey)
-	if len(args) > 0 {
-		res = fmt.Sprintf(m.MenuText(langKey), args...)
-	}
-	return &SessionResponse{
-		Response:      res,
-		Failed:        false,
-		StatusMessage: "",
-		MenuName:      m.menuName,
-	}
-}
-
-func (m *menu) GenerateMenu(ctx context.Context, w http.ResponseWriter, up UssdPayload) (*SessionResponse, error) {
-	hopResponse, err := m.generateMenuFn(ctx, up, m)
+func (m *menu) GenerateResponse(ctx context.Context, p UssdPayload) (SessionResponse, error) {
+	res, err := m.generateMenuFn(ctx, p)
 	switch {
 	case err == nil:
-		hopResponse.MenuName = m.menuName
 	case errors.Is(err, ErrFailedValidation):
-		if hopResponse == nil {
-			hopResponse = &SessionResponse{}
+		if res == nil {
+			res = &sessionResponse{}
 		}
-
-		hopResponse.Failed = true
-		hopResponse.StatusMessage = firstVal(hopResponse.StatusMessage, ErrFailedValidation.Error())
-		hopResponse.MenuName = m.menuName
-
-		m.writeResponse(w, up, hopResponse)
-
-		return hopResponse, nil
+		res.setFailed()
+		res.setStatusMessage(firstVal(res.StatusMessage(), ErrFailedValidation.Error()))
+		res.setMenu(m.menuName)
 	default:
-		http.Error(w, "END Try again later", http.StatusInternalServerError)
-
-		if hopResponse == nil {
-			hopResponse = &SessionResponse{}
-		}
-
-		hopResponse.Failed = true
-		hopResponse.StatusMessage = firstVal(hopResponse.StatusMessage, err.Error())
-		hopResponse.MenuName = m.menuName
-
-		return hopResponse, err
+		return nil, err
 	}
 
-	m.writeResponse(w, up, hopResponse)
-
-	return hopResponse, nil
+	return res, nil
 }
 
-const (
-	conPrefix = "CON"
-	endPrefix = "END"
-	uprPrefix = "UPR"
-)
+// menuText returns the menu text
+func (m *menu) menuText(lang string) string {
+	return m.menuContent[lang]
+}
 
-func (m *menu) writeResponse(w http.ResponseWriter, up UssdPayload, sessionResponse *SessionResponse) {
-	res := strings.TrimSpace(sessionResponse.Response)
-
-	if sessionResponse.Failed || up.ValidationFailed() {
-		valErr := firstVal(getValidationError(up), sessionResponse.StatusMessage)
-		switch {
-		case strings.HasPrefix(res, conPrefix):
-			res = fmt.Sprintf("CON %s\n%s", valErr, res[4:])
-		case strings.HasPrefix(res, endPrefix):
-			res = fmt.Sprintf("END %s\n%s", valErr, res[4:])
-		case strings.HasPrefix(res, uprPrefix):
-		default:
-			res = fmt.Sprintf("CON %s\n%s", valErr, res)
-		}
+func (m *menu) ExecuteMenuArgs(key string, args ...interface{}) SessionResponse {
+	res := m.menuText(key)
+	if len(args) > 0 {
+		res = fmt.Sprintf(res, args...)
 	}
-
-	if !strings.HasPrefix(res, "CON ") && !strings.HasPrefix(res, "UPR") && !strings.HasPrefix(res, "END") {
-		res = fmt.Sprintf("CON %s", res)
-	}
-
-	_, err := io.WriteString(w, res)
-	if err != nil {
-		log.Printf("ERROR: %v", err)
+	return &sessionResponse{
+		response:      res,
+		failed:        false,
+		statusMessage: "",
+		menuName:      m.menuName,
 	}
 }

@@ -9,7 +9,7 @@ import (
 )
 
 // UssdPayload interface has getters for getting original session data for the ussd request.
-// It is an interface to prevents inadvertent modification of ussd data down the request chain
+// It is an interface to prevents inadvertent modification of ussd data in the lifetime of the ussd request
 type UssdPayload interface {
 	SessionId() string
 	ServiceCode() string
@@ -23,54 +23,58 @@ type UssdPayload interface {
 }
 
 type ussdPayload struct {
-	sessionID        string
-	serviceCode      string
-	msisdn           string
-	ussdParams       string
-	ussdCurrentParam string
-	isShortCut       bool
-	validationFailed bool
-	time             string
+	// make data unexported
+	data *ussdPayloadInternal
 }
 
-type incomingUssd struct {
-	Msisdn      string `json:"msisdn"`
-	SessionID   string `json:"sessionId"`
-	ServiceCode string `json:"serviceCode"`
-	UssdString  string `json:"ussdString"`
+// json serializable
+type ussdPayloadInternal struct {
+	SessionID        string `json:"session_id,omitempty"`
+	ServiceCode      string `json:"service_code,omitempty"`
+	Msisdn           string `json:"msisdn,omitempty"`
+	UssdParams       string `json:"ussd_params,omitempty"`
+	UssdCurrentParam string `json:"ussd_current_param,omitempty"`
+	IsShortCut       bool   `json:"is_short_cut,omitempty"`
+	ValidationFailed bool   `json:"validation_failed,omitempty"`
+	Time             string `json:"time,omitempty"`
+	skip             bool
+}
+
+func (p *ussdPayload) SkipSaving() bool {
+	return p.data.skip
 }
 
 func (p *ussdPayload) SessionId() string {
-	return p.sessionID
+	return p.data.SessionID
 }
 
 func (p *ussdPayload) ServiceCode() string {
-	return p.serviceCode
+	return p.data.ServiceCode
 }
 
 func (p *ussdPayload) Msisdn() string {
-	return p.msisdn
+	return p.data.Msisdn
 }
 
 func (p *ussdPayload) UssdParams() string {
-	return p.ussdParams
+	return p.data.UssdParams
 }
 
 func (p *ussdPayload) JSON() ([]byte, error) {
-	return json.Marshal(p)
+	return json.Marshal(p.data)
 }
 
 func (p *ussdPayload) UssdCurrentParam() string {
-	return p.ussdCurrentParam
+	return p.data.UssdCurrentParam
 }
 func (p *ussdPayload) IsShortCut() bool {
-	return p.isShortCut
+	return p.data.IsShortCut
 }
 func (p *ussdPayload) ValidationFailed() bool {
-	return p.validationFailed
+	return p.data.ValidationFailed
 }
 func (p *ussdPayload) Time() string {
-	return p.time
+	return p.data.Time
 }
 
 // gets the first value from params
@@ -88,6 +92,13 @@ func getQueryVal(params url.Values, keys ...string) string {
 	return ""
 }
 
+type incomingUssd struct {
+	Msisdn      string `json:"msisdn"`
+	SessionID   string `json:"sessionId"`
+	ServiceCode string `json:"serviceCode"`
+	UssdString  string `json:"ussdString"`
+}
+
 // UssdPayloadFromRequest will read request params or body and return an interface for reading data
 func UssdPayloadFromRequest(r *http.Request) UssdPayload {
 
@@ -103,11 +114,13 @@ func UssdPayloadFromRequest(r *http.Request) UssdPayload {
 		}
 
 		payload = &ussdPayload{
-			sessionID:        getQueryVal(params, "SESSION_ID", "session-id", "session_id", "session"),
-			serviceCode:      getQueryVal(params, "SERVICE_CODE", "ORIG", "service-code", "service_code"),
-			msisdn:           getQueryVal(params, "DEST", "MSISDN", "msisdn"),
-			ussdParams:       getQueryVal(params, "USSD_PARAMS", "USSD_STRING", "ussd-string", "ussd_string"),
-			ussdCurrentParam: strings.TrimSpace(ussdParams[len(ussdParams)-1]),
+			data: &ussdPayloadInternal{
+				SessionID:        getQueryVal(params, "SESSION_ID", "session-id", "session_id", "session"),
+				ServiceCode:      getQueryVal(params, "SERVICE_CODE", "ORIG", "service-code", "service_code"),
+				Msisdn:           getQueryVal(params, "DEST", "MSISDN", "msisdn"),
+				UssdParams:       getQueryVal(params, "USSD_PARAMS", "USSD_STRING", "ussd-string", "ussd_string"),
+				UssdCurrentParam: strings.TrimSpace(ussdParams[len(ussdParams)-1]),
+			},
 		}
 	case http.MethodPost:
 		p := &incomingUssd{}
@@ -127,14 +140,16 @@ func UssdPayloadFromRequest(r *http.Request) UssdPayload {
 		}
 
 		payload = &ussdPayload{
-			sessionID:        p.SessionID,
-			serviceCode:      p.ServiceCode,
-			msisdn:           p.Msisdn,
-			ussdParams:       p.UssdString,
-			ussdCurrentParam: ussdParams[len(ussdParams)-1],
-			isShortCut:       false,
-			validationFailed: false,
-			time:             "",
+			data: &ussdPayloadInternal{
+				SessionID:        p.SessionID,
+				ServiceCode:      p.ServiceCode,
+				Msisdn:           p.Msisdn,
+				UssdParams:       p.UssdString,
+				UssdCurrentParam: ussdParams[len(ussdParams)-1],
+				IsShortCut:       false,
+				ValidationFailed: false,
+				Time:             "",
+			},
 		}
 	}
 
@@ -142,14 +157,20 @@ func UssdPayloadFromRequest(r *http.Request) UssdPayload {
 }
 
 // UssdPayloadFromRequest will read the json byte and return an interface for reading data
-func UssdPayloadFromJSON(jsonData []byte) (UssdPayload, error) {
+func UssdPayloadFromJSON(bs []byte) (UssdPayload, error) {
 
-	payload := &ussdPayload{}
+	payload := &ussdPayload{
+		data: &ussdPayloadInternal{},
+	}
 
-	err := json.Unmarshal(jsonData, payload)
+	err := json.Unmarshal(bs, payload.data)
 	if err != nil {
-		return &ussdPayload{}, err
+		return nil, err
 	}
 
 	return payload, nil
+}
+
+func SkipSavingPayload(payload UssdPayload) {
+	payload.(*ussdPayload).data.skip = true
 }
