@@ -10,17 +10,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-redis/redis/v8"
-
 	"google.golang.org/grpc/grpclog"
 	"gorm.io/gorm"
 )
 
 const (
-	currentMenuKey  = "current_menu"
-	previousMenuKey = "previous_menu"
-	currentPayload  = "current_payload"
-	languageKey     = "language"
+	nextMenuKey    = "next_menu"
+	currentMenuKey = "current_menu"
+	currentPayload = "current_payload"
+	languageKey    = "language"
 )
 
 type UssdApp struct {
@@ -63,7 +61,7 @@ func NewUssdApp(ctx context.Context, opt *Options) (*UssdApp, error) {
 		return nil, errors.New("missing logger")
 	default:
 		if opt.SessionDuration == 0 {
-			opt.SessionDuration = time.Minute * 10
+			opt.SessionDuration = time.Minute * 5
 		}
 	}
 
@@ -105,12 +103,12 @@ func ValidateAppMenus(app *UssdApp) error {
 	for _, val := range app.allmenus {
 		_, ok := app.allmenus[val.MenuName()]
 		if !ok {
-			return fmt.Errorf("menu %s not registered", val.PreviousMenu())
+			return fmt.Errorf("menu %s not registered", val.MenuName())
 		}
-		_, ok = app.allmenus[val.PreviousMenu()]
-		if !ok && val.PreviousMenu() != "" && app.homeMenu != val.MenuName() {
-			return fmt.Errorf("previous menu %s for %s menu is not registered", val.PreviousMenu(), val.MenuName())
-		}
+		// _, ok = app.allmenus[val.PreviousMenu()]
+		// if !ok && val.PreviousMenu() != "" && app.homeMenu != val.MenuName() {
+		// 	return fmt.Errorf("previous menu %s for %s menu is not registered", val.PreviousMenu(), val.MenuName())
+		// }
 		_, ok = app.allmenus[val.NextMenu()]
 		if !ok && val.NextMenu() != "" {
 			return fmt.Errorf("next menu %s for %s menu is not registered", val.NextMenu(), val.MenuName())
@@ -127,8 +125,8 @@ func ValidateMenu(m Menu) error {
 		return errors.New("nil menu not allowed")
 	case m.MenuName() == "":
 		return errors.New("missing menu name")
-	case m.PreviousMenu() == "":
-		return fmt.Errorf("previous menu for %s is missing", m.MenuName())
+	// case m.PreviousMenu() == "":
+	// return fmt.Errorf("previous menu for %s is missing", m.MenuName())
 	case m.NextMenu() == "":
 		return fmt.Errorf("next menu for %s is missing", m.MenuName())
 	}
@@ -190,7 +188,26 @@ func (app *UssdApp) GetNextMenu(currentMenu Menu, payload UssdPayload) (Menu, er
 	return next, nil
 }
 
-// SaveMenuNameAsCurrent will save the menu eith given name as current.
+// GetPreviousMenu will attempt to get the previous menu for the session
+func (app *UssdApp) GetPreviousMenu(ctx context.Context, payload UssdPayload) (Menu, error) {
+	prev, err := app.Cache().GetMapField(ctx, app.GetSessionKey(payload), currentMenuKey)
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrKeyNotFound):
+		prev = app.homeMenu
+	default:
+		return nil, fmt.Errorf("failed to get previous menu: %v", err)
+	}
+
+	prevMenu, ok := app.allmenus[prev]
+	if !ok {
+		return nil, fmt.Errorf("%v: %s", ErrMenuNotExist, prev)
+	}
+
+	return prevMenu, nil
+}
+
+// SaveMenuNameAsCurrent will save the menu with given name as current.
 func (app *UssdApp) SaveMenuNameAsCurrent(ctx context.Context, menuName string, payload UssdPayload) (Menu, error) {
 	menu, ok := app.allmenus[menuName]
 	if !ok {
@@ -207,23 +224,23 @@ func (app *UssdApp) SaveMenuNameAsCurrent(ctx context.Context, menuName string, 
 
 // SaveMenuAsCurrent will save the menu as current in cache.
 //
-// It will be used for the next incoming request to determine the right menu to render
+// # It will be used for the next incoming request to determine the right menu to render
 //
 // Will fail of the menu does not exist
 func (app *UssdApp) SaveMenuAsCurrent(ctx context.Context, menu Menu, payload UssdPayload) error {
+	// Marshal payload
 	bs, err := payload.JSON()
 	if err != nil {
 		return err
 	}
 
-	key := app.sessionKey(payload)
+	// Save to cache
 	err = app.opt.Cache.SetMap(
 		ctx,
-		key,
+		app.sessionKey(payload),
 		map[string]interface{}{
-			currentMenuKey:  menu.MenuName(),
-			previousMenuKey: menu.PreviousMenu(),
-			currentPayload:  bs,
+			nextMenuKey:    menu.MenuName(),
+			currentPayload: bs,
 		},
 	)
 	if err != nil {
@@ -235,14 +252,14 @@ func (app *UssdApp) SaveMenuAsCurrent(ctx context.Context, menu Menu, payload Us
 
 // GetCurrentMenu will get the current menu
 //
-// If no menu is found, it will default to home menu
+// # If no menu is found, it will default to home menu
 //
 // To set the home menu, use the helper SetHomeMenu
 func (app *UssdApp) GetCurrentMenu(ctx context.Context, payload UssdPayload) (Menu, error) {
-	res, err := app.opt.Cache.GetMapField(ctx, app.sessionKey(payload), currentMenuKey)
+	res, err := app.opt.Cache.GetMapField(ctx, app.sessionKey(payload), nextMenuKey)
 	switch {
 	case err == nil:
-	case errors.Is(err, redis.Nil):
+	case errors.Is(err, ErrKeyNotFound):
 		return app.allmenus[app.homeMenu], nil
 	default:
 		return nil, fmt.Errorf("failed to get current_menu from map: %v", err)
@@ -256,43 +273,73 @@ func (app *UssdApp) GetCurrentMenu(ctx context.Context, payload UssdPayload) (Me
 	return menu, nil
 }
 
+func (app *UssdApp) GetSessionMenu(ctx context.Context, payload UssdPayload) (Menu, bool, error) {
+	var (
+		isNew      bool
+		sessionKey = app.GetSessionKey(payload)
+	)
+
+	res, err := app.opt.Cache.GetMapField(ctx, sessionKey, nextMenuKey)
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrKeyNotFound):
+		// Session is new so we set some data
+		err = app.opt.Cache.SetMapField(ctx, sessionKey, "new", "true")
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to set session data: %v", err)
+		}
+
+		// Set expiration for key
+		err = app.Cache().Expire(ctx, sessionKey, app.opt.SessionDuration)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to set session expiration: %v", err)
+		}
+
+		isNew = true
+	default:
+		return nil, false, fmt.Errorf("failed to get current_menu from map: %v", err)
+	}
+
+	menu, ok := app.allmenus[res]
+	if !ok {
+		return app.allmenus[app.homeMenu], isNew, nil
+	}
+
+	return menu, isNew, nil
+}
+
 func sessionSetKey(appId string) string {
 	return fmt.Sprintf("%s:sessions", appId)
 }
 
 // IsNewSession will check if incoming ussd session is new
 //
-// If session is new, it will be saved and automatically be cleared after session duration
+// # If session is new, it will be saved and automatically be cleared after session duration
+//
+// Session duration is set when creating instance of the Ussd app.
 func (app *UssdApp) IsNewSession(ctx context.Context, payload UssdPayload) (bool, error) {
-	exists, err := app.opt.Cache.SetUnique(ctx, sessionSetKey(app.opt.AppName), fmt.Sprintf("%s:%s", payload.Msisdn(), payload.SessionId()))
-	if err != nil {
+	// Get cache key
+	// If its empty or nil then its new session
+	// Else ongoin session
+	isNew := false
+	_, err := app.opt.Cache.GetMapField(ctx, app.GetSessionKey(payload), "new")
+	switch {
+	case err == nil:
+		fmt.Println("not a new session")
+	case errors.Is(err, ErrKeyNotFound):
+		fmt.Println("new session")
+		// New session
+		isNew = true
+		// Set value for the map so next time is not new session
+		err = app.opt.Cache.SetMapField(ctx, app.GetSessionKey(payload), "new", "true")
+		if err != nil {
+			return false, err
+		}
+	default:
 		return false, fmt.Errorf("failed to check if session is new: %v", err)
 	}
 
-	var (
-		sessionID = payload.SessionId()
-		msisdn    = payload.Msisdn()
-	)
-
-	if !exists {
-		time.AfterFunc(app.opt.SessionDuration, func() {
-			// Delete user cache
-			key := app.sessionKey(payload)
-			err = app.Cache().Delete(context.Background(), key)
-			if err != nil {
-				app.Logger().Errorf("ERROR DELETING SESSION DATA: %v", err)
-			}
-			// Remove session key from set
-			err := app.deleteSessionSetKey(context.Background(), msisdn, sessionID)
-			if err != nil {
-				app.Logger().Errorf("ERROR DELETING SESSION: %v", err)
-				return
-			}
-			app.Logger().Infof("SESSION %s DELETED", sessionID)
-		})
-	}
-
-	return !exists || payload.UssdParams() == "", nil
+	return isNew, nil
 }
 
 // deleteSessionSetKey will remove session key from cache
@@ -346,16 +393,19 @@ func (app *UssdApp) ReplaceMenuWithName(ctx context.Context, menuName string, pa
 }
 
 func (app *UssdApp) ReplaceMenu(ctx context.Context, payload UssdPayload, menu Menu) (SessionResponse, error) {
+	// Save menu as current
 	err := app.SaveMenuAsCurrent(ctx, menu, payload)
 	if err != nil {
 		return nil, fmt.Errorf("failed to save current menu: %v", err)
 	}
 
+	// Generate response
 	sr, err := menu.GenerateResponse(ctx, payload)
 	if err != nil {
 		return nil, err
 	}
 
+	// Update next menu
 	err = app.UpdateNextMenu(ctx, payload, menu)
 	if err != nil {
 		return nil, err
@@ -368,17 +418,8 @@ func (app *UssdApp) ReplaceMenu(ctx context.Context, payload UssdPayload, menu M
 }
 
 // getPreviousPayload will get the payload for the ussd request
-func (app *UssdApp) getPreviousPayload(ctx context.Context, payload UssdPayload) (UssdPayload, error) {
-	v, err := app.opt.Cache.GetMapField(ctx, app.sessionKey(payload), currentPayload)
-	switch {
-	case err == nil:
-	case errors.Is(err, redis.Nil):
-		return payload, nil
-	default:
-		return nil, fmt.Errorf("failed to get previous payload: %v", err)
-	}
-
-	payloadPrev, err := UssdPayloadFromJSON([]byte(v))
+func (app *UssdApp) getPreviousPayload(ctx context.Context, previousPayload string) (UssdPayload, error) {
+	payloadPrev, err := UssdPayloadFromJSON([]byte(previousPayload))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get json payload: %v", err)
 	}
@@ -386,22 +427,29 @@ func (app *UssdApp) getPreviousPayload(ctx context.Context, payload UssdPayload)
 	return payloadPrev, nil
 }
 
-// PreviousMenuInvalid will return render the previous menu content prefixed by the error string
+// PreviousMenuWithError will return render the previous menu content prefixed by the error string
 //
 // This helper is usually called after the user has input wrong details and you want to return the same menu
 // but a the helper string appended on the top of the menu.
 // The helper is mearnt to guide the user on what went wrong
-func (app *UssdApp) PreviousMenuInvalid(ctx context.Context, payload UssdPayload, currMenu Menu, helper string) (SessionResponse, error) {
-	payloadPrev, err := app.getPreviousPayload(ctx, payload)
+func (app *UssdApp) PreviousMenuWithError(ctx context.Context, payload UssdPayload, currMenu Menu, erroText string) (SessionResponse, error) {
+	// Get previous menu
+	val, err := app.Cache().GetMapFields(ctx, app.GetSessionKey(payload), currentMenuKey, currentPayload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get previous menu: %v", err)
+	}
+
+	// Get previous payload
+	payloadPrev, err := app.getPreviousPayload(ctx, val[currentPayload])
 	if err != nil {
 		return nil, err
 	}
 
-	fmt.Println("Previous payload: ", payloadPrev.UssdCurrentParam())
+	fmt.Println("Previous payload: ", payloadPrev.UssdCurrentParam(), val[currentMenuKey])
 
-	prevMenu, ok := app.allmenus[currMenu.PreviousMenu()]
+	prevMenu, ok := app.allmenus[val[currentMenuKey]]
 	if !ok {
-		return nil, fmt.Errorf("previous menu does not exist %s: %w", currMenu.PreviousMenu(), ErrMenuExist)
+		return nil, fmt.Errorf("previous menu does not exist %s: %w", val[currentMenuKey], ErrMenuNotExist)
 	}
 
 	sr, err := prevMenu.GenerateResponse(ctx, payloadPrev)
@@ -412,14 +460,14 @@ func (app *UssdApp) PreviousMenuInvalid(ctx context.Context, payload UssdPayload
 	sr.setMenu(prevMenu.MenuName())
 	payload.(*ussdPayload).data.ValidationFailed = true
 	sr.setFailed()
-	sr.setStatusMessage(helper)
+	sr.setStatusMessage(erroText)
 
 	return sr, nil
 }
 
 // GetShortCutMenu is a helper to find the first menu registered with the given shortcut
 //
-// A shortcut in this case is the ussd string data that comes during first session
+// # A shortcut in this case is the ussd string data that comes during first session
 //
 // The method should only be called for new sessions as ongoing session cannot be deemed as shortcut
 func (app *UssdApp) GetShortCutMenu(ctx context.Context, payload UssdPayload) Menu {
@@ -488,6 +536,12 @@ func (app *UssdApp) UpdateNextMenu(ctx context.Context, payload UssdPayload, cur
 	err = app.SaveMenuAsCurrent(ctx, m, payload)
 	if err != nil {
 		return err
+	}
+
+	// Save previous menu in cache
+	err = app.Cache().SetMapField(ctx, app.GetSessionKey(payload), currentMenuKey, currMenu.MenuName())
+	if err != nil {
+		return fmt.Errorf("failed to save previous menu: %v", err)
 	}
 
 	return nil

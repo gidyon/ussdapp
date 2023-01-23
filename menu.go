@@ -17,7 +17,7 @@ type Menu interface {
 	// MenuName returns the name of the menu
 	MenuName() string
 	// PreviousMenu returns the previous menu for this menu
-	PreviousMenu() string
+	// PreviousMenu() string
 	// NextMenu returns the next menu for this menu
 	NextMenu() string
 	// Shortcut returns the shortcut text
@@ -51,11 +51,10 @@ func wrap(in fn1, m Menu) generateMenuFn {
 // NewMenu will create a new menu instance
 func NewMenu(opt *MenuOptions) Menu {
 	m := &menu{
-		menuName:     opt.MenuName,
-		previousMenu: opt.PreviousMenu,
-		nextMenu:     opt.NextMenu,
-		shortCut:     opt.ShortCut,
-		menuContent:  make(map[string]string, len(opt.MenuContent)),
+		menuName:    opt.MenuName,
+		nextMenu:    opt.NextMenu,
+		shortCut:    opt.ShortCut,
+		menuContent: make(map[string]string, len(opt.MenuContent)),
 	}
 	data := make(map[string]string, len(opt.MenuContent))
 	for k, v := range opt.MenuContent {
@@ -68,8 +67,8 @@ func NewMenu(opt *MenuOptions) Menu {
 }
 
 type menu struct {
-	menuName       string
-	previousMenu   string
+	menuName string
+	// previousMenu   string
 	nextMenu       string
 	shortCut       string
 	generateMenuFn func(context.Context, UssdPayload) (SessionResponse, error)
@@ -78,10 +77,6 @@ type menu struct {
 
 func (m *menu) MenuName() string {
 	return m.menuName
-}
-
-func (m *menu) PreviousMenu() string {
-	return m.previousMenu
 }
 
 func (m *menu) NextMenu() string {

@@ -40,8 +40,11 @@ type Cacher interface {
 	//   - SetMapField("myhash", map[string]interface{}{"key1": "value1", "key2": "value2"})
 	SetMapField(ctx context.Context, key string, values ...interface{}) error
 
-	// GetMapField retrieves field value for a map
+	// GetMapField retrieves field value from cache
 	GetMapField(ctx context.Context, key, field string) (string, error)
+
+	// GetMapFields retrieves fields values from cache
+	GetMapFields(ctx context.Context, key string, fields ...string) (map[string]string, error)
 
 	// DeleteMapField removes map field
 	DeleteMapField(ctx context.Context, key string, fields ...string) error
@@ -50,11 +53,14 @@ type Cacher interface {
 	//
 	// If the value does exist, should return 0
 	// else should return 1 to indicate that the value did not exist in the set
-	SetUnique(ctx context.Context, key string, value string) (bool, error)
+	// SetUnique(ctx context.Context, key string, value string) (bool, error)
 
 	// ExistInSet checks if a value exists in the set
 	ExistInSet(ctx context.Context, key string, value string) (bool, error)
 
 	// DeleteSetValue removes set value
 	DeleteSetValue(ctx context.Context, key string, value string) error
+
+	// Set expiration for the specified key
+	Expire(ctx context.Context, key string, dur time.Duration) error
 }
