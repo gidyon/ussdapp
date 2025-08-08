@@ -308,10 +308,6 @@ func (app *UssdApp) GetSessionMenu(ctx context.Context, payload UssdPayload) (Me
 	return menu, isNew, nil
 }
 
-func sessionSetKey(appId string) string {
-	return fmt.Sprintf("%s:sessions", appId)
-}
-
 // IsNewSession will check if incoming ussd session is new
 //
 // # If session is new, it will be saved and automatically be cleared after session duration
@@ -340,15 +336,6 @@ func (app *UssdApp) IsNewSession(ctx context.Context, payload UssdPayload) (bool
 	}
 
 	return isNew, nil
-}
-
-// deleteSessionSetKey will remove session key from cache
-func (app *UssdApp) deleteSessionSetKey(ctx context.Context, sessionID, msisdn string) error {
-	err := app.opt.Cache.DeleteSetValue(ctx, sessionSetKey(app.opt.AppName), fmt.Sprintf("%s:%s", msisdn, sessionID))
-	if err != nil {
-		return fmt.Errorf("failed to remove session: %v", err)
-	}
-	return nil
 }
 
 // SaveLanguage will save user language for the ussd session
@@ -432,7 +419,7 @@ func (app *UssdApp) getPreviousPayload(ctx context.Context, previousPayload stri
 // This helper is usually called after the user has input wrong details and you want to return the same menu
 // but a the helper string appended on the top of the menu.
 // The helper is mearnt to guide the user on what went wrong
-func (app *UssdApp) PreviousMenuWithError(ctx context.Context, payload UssdPayload, currMenu Menu, erroText string) (SessionResponse, error) {
+func (app *UssdApp) PreviousMenuWithError(ctx context.Context, payload UssdPayload, currMenu Menu, errorText string) (SessionResponse, error) {
 	// Get previous menu
 	val, err := app.Cache().GetMapFields(ctx, app.GetSessionKey(payload), currentMenuKey, currentPayload)
 	if err != nil {
@@ -460,7 +447,46 @@ func (app *UssdApp) PreviousMenuWithError(ctx context.Context, payload UssdPaylo
 	sr.setMenu(prevMenu.MenuName())
 	payload.(*ussdPayload).data.ValidationFailed = true
 	sr.setFailed()
-	sr.setStatusMessage(erroText)
+	sr.setStatusMessage(errorText)
+
+	return sr, nil
+}
+
+// AddErrorToMenu adds an error message to the menu to be rendered
+func (app *UssdApp) AddErrorToMenu(ctx context.Context, payload UssdPayload) {
+	payload.(*ussdPayload).data.ValidationFailed = true
+}
+
+// ReplaceMenuWithError will replace the current menu with the menu provided and an error message
+func (app *UssdApp) ReplaceMenuWithError(ctx context.Context, payload UssdPayload, menuName, errorText string) (SessionResponse, error) {
+	menu, ok := app.allmenus[menuName]
+	if !ok {
+		return nil, ErrMenuNotExist
+	}
+
+	// Save menu as current
+	err := app.SaveMenuAsCurrent(ctx, menu, payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to save current menu: %v", err)
+	}
+
+	// Generate response
+	sr, err := menu.GenerateResponse(ctx, payload)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update next menu
+	err = app.UpdateNextMenu(ctx, payload, menu)
+	if err != nil {
+		return nil, err
+	}
+
+	payload.(*ussdPayload).data.skip = true
+	sr.setMenu(menu.MenuName())
+	payload.(*ussdPayload).data.ValidationFailed = true
+	sr.setFailed()
+	sr.setStatusMessage(errorText)
 
 	return sr, nil
 }
